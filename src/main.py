@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from json import dumps
 from pathlib import Path
 from typing import Any, List
 
@@ -7,6 +8,8 @@ from bs4 import BeautifulSoup, ResultSet, Tag
 from pandas import DataFrame, Series
 from progress.bar import Bar
 from requests import Response, get
+
+from src.db import DB
 
 
 def getPage(url: str) -> Response:
@@ -74,7 +77,7 @@ def extractPaperMetadata(df: DataFrame) -> DataFrame:
 
             card: Tag
             for card in cards:
-                badgesDatum: List[dict[str, str]] = []
+                badgesDatum: List[dict[str, str] | None] = []
                 submitterDatum: dict[str, str] = {
                     "submitter": "",
                     "github": "",
@@ -123,8 +126,8 @@ def extractPaperMetadata(df: DataFrame) -> DataFrame:
                         "status": status,
                         "time": time,
                         "title": title,
-                        "badges": badgesDatum,
-                        "submitter": submitterDatum,
+                        "badges": dumps(obj=badgesDatum),
+                        "submitter": dumps(obj=submitterDatum),
                         "doi": doi,
                     }
                 )
@@ -151,6 +154,9 @@ def extractPaperMetadata(df: DataFrame) -> DataFrame:
     default=Path("./joss.db"),
 )
 def main(outputFP: Path) -> None:
+    db: DB = DB(fp=outputFP)
+    db.createTables()
+
     tnop: dict[str, int] = getTotalNumberOfPages(
         url="https://joss.theoj.org/papers",
     )
@@ -177,7 +183,20 @@ def main(outputFP: Path) -> None:
     hfmDF: DataFrame = loadHTMLFrontMatter(resps=htmlFrontMatter)
     pmDF: DataFrame = extractPaperMetadata(df=hfmDF)
 
-    pmDF.to_json(path_or_buf="temp.json", index=False, indent=4)
+    hfmDF.to_sql(
+        name="front_matter",
+        con=db.engine,
+        if_exists="append",
+        index=True,
+        index_label="id",
+    )
+    pmDF.to_sql(
+        name="metadata",
+        con=db.engine,
+        if_exists="append",
+        index=True,
+        index_label="id",
+    )
 
 
 if __name__ == "__main__":

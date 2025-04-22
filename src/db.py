@@ -6,6 +6,7 @@ from sqlalchemy import (
     Engine,
     ForeignKey,
     Integer,
+    MetaData,
     String,
     Table,
     create_engine,
@@ -15,6 +16,7 @@ from sqlalchemy import (
 class DB:
     def __init__(self, fp: Path) -> None:
         self.engine: Engine = create_engine(url=f"sqlite:///{fp}")
+        self.metadata: MetaData = MetaData()
 
     def createTables(self) -> None:
         _: Table = Table(
@@ -41,7 +43,7 @@ class DB:
             Column("status", String, nullable=False),
             Column("time", String, nullable=False),
             Column("title", String, nullable=False),
-            Column("badges", JSON, nullable=False),
+            Column("badges", JSON, nullable=None),
             Column("submitter", JSON, nullable=False),
         )
 
