@@ -36,7 +36,7 @@ def getTotalNumberOfPages(url: str) -> dict[str, int]:
     return {"docs": totalDocs, "pages": totalPages}
 
 
-def loadHTMLFrontmatter(resps: List[Response]) -> DataFrame:
+def loadHTMLFrontMatter(resps: List[Response]) -> DataFrame:
     data: dict[str, List[Any]] = {
         "url": [],
         "page": [],
@@ -58,7 +58,7 @@ def extractPaperMetadata(df: DataFrame) -> DataFrame:
     data: List[dict[str, Any]] = []
 
     with Bar(
-        "Extracting paper metadata from HTML frontmatter...", max=df.shape[0]
+        "Extracting paper metadata from HTML front matter...", max=df.shape[0]
     ) as bar:
         idx: int
         row: Series
@@ -119,7 +119,7 @@ def extractPaperMetadata(df: DataFrame) -> DataFrame:
 
                 data.append(
                     {
-                        "frontmatter_id": idx,
+                        "front_matter_id": idx,
                         "status": status,
                         "time": time,
                         "title": title,
@@ -155,7 +155,7 @@ def main(outputFP: Path) -> None:
         url="https://joss.theoj.org/papers",
     )
 
-    htmlFrontmatter: List[Response] = []
+    htmlFrontMatter: List[Response] = []
 
     with Bar(
         "Downloading HTML front matter of JOSS...", max=tnop["pages"]
@@ -166,7 +166,7 @@ def main(outputFP: Path) -> None:
                 resp: Response = getPage(
                     url=f"https://joss.theoj.org/papers?page={page}",
                 )
-                htmlFrontmatter.append(resp)
+                htmlFrontMatter.append(resp)
                 bar.next()
 
             executor.map(
@@ -174,7 +174,7 @@ def main(outputFP: Path) -> None:
                 range(1, tnop["pages"] + 1),
             )
 
-    hfmDF: DataFrame = loadHTMLFrontmatter(resps=htmlFrontmatter)
+    hfmDF: DataFrame = loadHTMLFrontMatter(resps=htmlFrontMatter)
     pmDF: DataFrame = extractPaperMetadata(df=hfmDF)
 
     pmDF.to_json(path_or_buf="temp.json", index=False, indent=4)
