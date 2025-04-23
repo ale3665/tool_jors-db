@@ -125,6 +125,21 @@ def getJOSSHTMLFrontMatter(pages: int) -> DataFrame:
 
 
 def extractPaperMetadata(df: DataFrame) -> DataFrame:
+    """
+    Extracts metadata from the HTML front matter of JOSS papers.
+
+    This function iterates through each row of the input DataFrame, parses the HTML
+    content, and extracts relevant metadata such as status, time, title, badges,
+    submitter information, and DOI.  The extracted metadata is then organized
+    into a new DataFrame.
+
+    Args:
+        df: A Pandas DataFrame containing the HTML front matter of JOSS papers.
+             Each row should have a column named "html" containing the HTML content.
+
+    Returns:
+        A Pandas DataFrame containing the extracted metadata.
+    """  # noqa: E501
     data: List[dict[str, Any]] = []
 
     with Bar(
@@ -206,7 +221,10 @@ def extractPaperMetadata(df: DataFrame) -> DataFrame:
 
             bar.next()
 
-    return DataFrame(data=data)
+    return DataFrame(data=data).sort_values(
+        by="front_matter_id",
+        ignore_index=True,
+    )
 
 
 def extractRepositoryFromMetadata(df: DataFrame) -> DataFrame:
@@ -282,9 +300,11 @@ def main(outputFP: Path) -> None:
     4. Extract repos from metadata
     """
 
-    totalNumberOfPagesAndPapers: dict[str, int] = getTotalNumberOfDocumentsAndPages(
-        url="https://joss.theoj.org/papers",
-    )  # noqa: E501
+    totalNumberOfPagesAndPapers: dict[str, int] = (
+        getTotalNumberOfDocumentsAndPages(  # noqa: E501
+            url="https://joss.theoj.org/papers",
+        )
+    )
 
     hfmDF: DataFrame = getJOSSHTMLFrontMatter(
         pages=totalNumberOfPagesAndPapers["pages"]
