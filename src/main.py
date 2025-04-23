@@ -71,6 +71,21 @@ def getTotalNumberOfDocumentsAndPages(url: str) -> dict[str, int]:
 
 
 def getJOSSHTMLFrontMatter(pages: int) -> DataFrame:
+    """
+    Fetches the HTML front matter of JOSS papers for a specified number of pages.
+
+    This function uses concurrent execution to download the HTML content of JOSS papers
+    for a given range of pages. It collects the URL, page number, status code, and
+    HTML content for each paper.  The results are then organized into a Pandas DataFrame
+    and sorted by page number.
+
+    Args:
+        pages: The number of pages to fetch JOSS papers from.
+
+    Returns:
+        A Pandas DataFrame containing the HTML front matter of the JOSS papers,
+        sorted by page number.  Returns an empty DataFrame if an error occurs.
+    """  # noqa: E501
     data: dict[str, List[Any]] = {
         "url": [],
         "page": [],
@@ -97,12 +112,14 @@ def getJOSSHTMLFrontMatter(pages: int) -> DataFrame:
                 range(1, pages + 1),
             )
 
-    resp: Response
-    for resp in resps:
-        data["url"].append(resp.url)
-        data["page"].append(int(resp.url.split("=")[1]))
-        data["status_code"].append(resp.status_code)
-        data["html"].append(resp.content)
+    with Bar("Extracting response metadata...", max=len(resps)) as bar:
+        resp: Response
+        for resp in resps:
+            data["url"].append(resp.url)
+            data["page"].append(int(resp.url.split("=")[1]))
+            data["status_code"].append(resp.status_code)
+            data["html"].append(resp.content)
+            bar.next()
 
     return DataFrame(data=data).sort_values(by="page", ignore_index=True)
 
@@ -267,9 +284,11 @@ def main(outputFP: Path) -> None:
 
     totalNumberOfPagesAndPapers: dict[str, int] = getTotalNumberOfDocumentsAndPages(
         url="https://joss.theoj.org/papers",
-    )
+    )  # noqa: E501
 
-    hfmDF: DataFrame = loadHTMLFrontMatter(resps=htmlFrontMatter)
+    hfmDF: DataFrame = getJOSSHTMLFrontMatter(
+        pages=totalNumberOfPagesAndPapers["pages"]
+    )
     pmDF: DataFrame = extractPaperMetadata(df=hfmDF)
     rDF: DataFrame = extractRepositoryFromMetadata(df=pmDF)
 
