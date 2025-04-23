@@ -1,7 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from json import dumps
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, Tuple
 
 import click
 from bs4 import BeautifulSoup, ResultSet, Tag
@@ -120,6 +120,11 @@ def extractPaperMetadata(df: DataFrame) -> DataFrame:
                 doiTag: Tag = card.find(name="div", attrs={"class": "doi"})
                 doi: str = doiTag.find(name="a").get("href").strip()
 
+                if doi.__contains__("https://joss.theoj.org"):
+                    pass
+                else:
+                    doi = "https://joss.theoj.org" + doi
+
                 data.append(
                     {
                         "front_matter_id": idx,
@@ -132,6 +137,53 @@ def extractPaperMetadata(df: DataFrame) -> DataFrame:
                     }
                 )
 
+            bar.next()
+
+    return DataFrame(data=data)
+
+
+def extractRepositoryFromMetadata(df: DataFrame) -> DataFrame:
+    resps: List[Tuple[int, Response]] = []
+    data: List[dict[str, Any]] = []
+
+    dois: List[Tuple[int, str]] = list(df["doi"].to_dict().items())
+
+    with Bar("Downloading paper webpage...", max=len(dois)) as bar:
+        with ThreadPoolExecutor() as executor:
+
+            def _run(pairing: Tuple[int, str]) -> None:
+                resp: Response = getPage(url=pairing[1])
+                datum: Tuple[Response] = (pairing[0], resp)
+                resps.append(datum)
+                bar.next()
+
+            executor.map(_run, dois)
+
+    with Bar(
+        "Extracting repository from paper webpages...", max=len(resps)
+    ) as bar:  # noqa: E501
+        metadataID: int
+        resp: Response
+        for metadataID, resp in resps:
+            statusCode: int = resp.status_code
+            html: str = resp.content
+
+            soup: BeautifulSoup = BeautifulSoup(markup=html, features="lxml")
+            buttonsDiv: Tag = soup.find(
+                name="div",
+                attrs={"class": "btn-group-vertical"},
+            )
+            repositoryButton: Tag = next(buttonsDiv.children)
+            repositoryURL: str = repositoryButton.get(key="href")
+
+            data.append(
+                {
+                    "metadata_id": metadataID,
+                    "status_code": statusCode,
+                    "repository_url": repositoryURL,
+                    "html": html,
+                }
+            )
             bar.next()
 
     return DataFrame(data=data)
@@ -182,6 +234,7 @@ def main(outputFP: Path) -> None:
 
     hfmDF: DataFrame = loadHTMLFrontMatter(resps=htmlFrontMatter)
     pmDF: DataFrame = extractPaperMetadata(df=hfmDF)
+    rDF: DataFrame = extractRepositoryFromMetadata(df=pmDF)
 
     hfmDF.to_sql(
         name="front_matter",
@@ -192,6 +245,13 @@ def main(outputFP: Path) -> None:
     )
     pmDF.to_sql(
         name="metadata",
+        con=db.engine,
+        if_exists="append",
+        index=True,
+        index_label="id",
+    )
+    rDF.to_sql(
+        name="software",
         con=db.engine,
         if_exists="append",
         index=True,

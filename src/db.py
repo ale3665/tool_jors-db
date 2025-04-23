@@ -47,4 +47,19 @@ class DB:
             Column("submitter", JSON, nullable=False),
         )
 
+        _: Table = Table(
+            "software",
+            self.metadata,
+            Column("id", Integer, primary_key=True, autoincrement=True),
+            Column(
+                "metadata_id",
+                Integer,
+                ForeignKey("metadata.id"),
+                nullable=False,
+            ),
+            Column("status_code", Integer, nullable=False),
+            Column("repository_url", String, nullable=False),
+            Column("html", String, nullable=False),
+        )
+
         self.metadata.create_all(bind=self.engine, checkfirst=True)
