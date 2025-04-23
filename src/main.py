@@ -13,6 +13,20 @@ from src.db import DB
 
 
 def getPage(url: str) -> Response:
+    """
+    Fetches a webpage content using the Requests library.
+
+    This function sends a GET request to the specified URL with a timeout of 60 seconds
+    and includes a header to indicate the preferred content type. It also implements
+    retry logic to handle potential network errors.
+
+    Args:
+        url: The URL of the webpage to fetch.
+
+    Returns:
+        A Response object containing the webpage content.
+        Returns None if all retries fail to fetch the page.
+    """  # noqa: E501
     return get(
         url=url,
         timeout=60,
@@ -22,7 +36,24 @@ def getPage(url: str) -> Response:
     )
 
 
-def getTotalNumberOfPages(url: str) -> dict[str, int]:
+def getTotalNumberOfDocumentsAndPages(url: str) -> dict[str, int]:
+    """
+    Retrieves the total number of documents and pages from a paginated webpage.
+
+    This function fetches the content of a webpage using the `getPage` function
+    and parses the HTML to extract the total number of documents and the total
+    number of pages. It handles potential network errors during the request.
+
+    Args:
+        url: The URL of the webpage to fetch.
+
+    Returns:
+        A dictionary containing the total number of documents and the total number of pages.
+        The dictionary has the following keys:
+            "docs": The total number of documents.
+            "pages": The total number of pages.
+        Returns an empty dictionary if an error occurs during the request or parsing.
+    """  # noqa: E501
     resp: Response = getPage(url=url)
     soup: BeautifulSoup = BeautifulSoup(markup=resp.content, features="lxml")
 
@@ -39,13 +70,32 @@ def getTotalNumberOfPages(url: str) -> dict[str, int]:
     return {"docs": totalDocs, "pages": totalPages}
 
 
-def loadHTMLFrontMatter(resps: List[Response]) -> DataFrame:
+def getJOSSHTMLFrontMatter(pages: int) -> DataFrame:
     data: dict[str, List[Any]] = {
         "url": [],
         "page": [],
         "status_code": [],
         "html": [],
     }
+
+    resps: List[Response] = []
+
+    with Bar(
+        "Downloading HTML front matter of JOSS...", max=pages
+    ) as bar:  # noqa: E501
+        with ThreadPoolExecutor() as executor:
+
+            def _run(page: int) -> None:
+                resp: Response = getPage(
+                    url=f"https://joss.theoj.org/papers?page={page}",
+                )
+                resps.append(resp)
+                bar.next()
+
+            executor.map(
+                _run,
+                range(1, pages + 1),
+            )
 
     resp: Response
     for resp in resps:
@@ -208,28 +258,16 @@ def main(outputFP: Path) -> None:
     db: DB = DB(fp=outputFP)
     db.createTables()
 
-    tnop: dict[str, int] = getTotalNumberOfPages(
+    """
+    Steps
+    2. Get the HTML frontmatter
+    3. Extract paper metadata from frontmatter
+    4. Extract repos from metadata
+    """
+
+    totalNumberOfPagesAndPapers: dict[str, int] = getTotalNumberOfDocumentsAndPages(
         url="https://joss.theoj.org/papers",
     )
-
-    htmlFrontMatter: List[Response] = []
-
-    with Bar(
-        "Downloading HTML front matter of JOSS...", max=tnop["pages"]
-    ) as bar:  # noqa: E501
-        with ThreadPoolExecutor() as executor:
-
-            def _run(page: int) -> None:
-                resp: Response = getPage(
-                    url=f"https://joss.theoj.org/papers?page={page}",
-                )
-                htmlFrontMatter.append(resp)
-                bar.next()
-
-            executor.map(
-                _run,
-                range(1, tnop["pages"] + 1),
-            )
 
     hfmDF: DataFrame = loadHTMLFrontMatter(resps=htmlFrontMatter)
     pmDF: DataFrame = extractPaperMetadata(df=hfmDF)
