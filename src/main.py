@@ -124,7 +124,7 @@ def getJOSSHTMLFrontMatter(pages: int) -> DataFrame:
     return DataFrame(data=data).sort_values(by="page", ignore_index=True)
 
 
-def extractPaperMetadata(df: DataFrame) -> DataFrame:
+def extractPaperMetadataFromFrontMatter(df: DataFrame) -> DataFrame:
     """
     Extracts metadata from the HTML front matter of JOSS papers.
 
@@ -227,7 +227,22 @@ def extractPaperMetadata(df: DataFrame) -> DataFrame:
     )
 
 
-def extractRepositoryFromMetadata(df: DataFrame) -> DataFrame:
+def extractRepositoryFromPaperMetadata(df: DataFrame) -> DataFrame:
+    """
+    Extracts the repository URL from the HTML content of JOSS papers.
+
+    This function iterates through each row of the input DataFrame, fetches the
+    HTML content of the corresponding paper webpage, extracts the repository URL
+    from the HTML, and creates a new DataFrame containing the extracted
+    metadata.  It uses a thread pool to fetch the webpages concurrently.
+
+    Args:
+        df: A Pandas DataFrame containing the HTML front matter of JOSS papers.
+            Each row should have a column named "html" containing the HTML content.
+
+    Returns:
+        A Pandas DataFrame containing the extracted repository URLs and other metadata.
+    """  # noqa: E501
     resps: List[Tuple[int, Response]] = []
     data: List[dict[str, Any]] = []
 
@@ -270,7 +285,10 @@ def extractRepositoryFromMetadata(df: DataFrame) -> DataFrame:
             )
             bar.next()
 
-    return DataFrame(data=data)
+    return DataFrame(data=data).sort_values(
+        by="metadata_id",
+        ignore_index=True,
+    )
 
 
 @click.command()
@@ -309,8 +327,8 @@ def main(outputFP: Path) -> None:
     hfmDF: DataFrame = getJOSSHTMLFrontMatter(
         pages=totalNumberOfPagesAndPapers["pages"]
     )
-    pmDF: DataFrame = extractPaperMetadata(df=hfmDF)
-    rDF: DataFrame = extractRepositoryFromMetadata(df=pmDF)
+    pmDF: DataFrame = extractPaperMetadataFromFrontMatter(df=hfmDF)
+    rDF: DataFrame = extractRepositoryFromPaperMetadata(df=pmDF)
 
     hfmDF.to_sql(
         name="front_matter",
