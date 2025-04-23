@@ -173,8 +173,7 @@ def extractRepositoryFromMetadata(df: DataFrame) -> DataFrame:
                 name="div",
                 attrs={"class": "btn-group-vertical"},
             )
-            repositoryButton: Tag = next(buttonsDiv.children)
-            repositoryURL: str = repositoryButton.get(key="href")
+            repositoryURL: str = buttonsDiv.find(name="a").get(key="href")
 
             data.append(
                 {
