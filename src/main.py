@@ -311,13 +311,6 @@ def main(outputFP: Path) -> None:
     db: DB = DB(fp=outputFP)
     db.createTables()
 
-    """
-    Steps
-    2. Get the HTML frontmatter
-    3. Extract paper metadata from frontmatter
-    4. Extract repos from metadata
-    """
-
     totalNumberOfPagesAndPapers: dict[str, int] = (
         getTotalNumberOfDocumentsAndPages(  # noqa: E501
             url="https://joss.theoj.org/papers",
@@ -330,27 +323,9 @@ def main(outputFP: Path) -> None:
     pmDF: DataFrame = extractPaperMetadataFromFrontMatter(df=hfmDF)
     rDF: DataFrame = extractRepositoryFromPaperMetadata(df=pmDF)
 
-    hfmDF.to_sql(
-        name="front_matter",
-        con=db.engine,
-        if_exists="append",
-        index=True,
-        index_label="id",
-    )
-    pmDF.to_sql(
-        name="metadata",
-        con=db.engine,
-        if_exists="append",
-        index=True,
-        index_label="id",
-    )
-    rDF.to_sql(
-        name="software",
-        con=db.engine,
-        if_exists="append",
-        index=True,
-        index_label="id",
-    )
+    db.df2table(df=hfmDF, table="front_matter")
+    db.df2table(df=pmDF, table="metadata")
+    db.df2table(df=rDF, table="software")
 
 
 if __name__ == "__main__":

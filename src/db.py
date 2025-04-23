@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pandas import DataFrame
 from sqlalchemy import (
     JSON,
     Column,
@@ -63,3 +64,12 @@ class DB:
         )
 
         self.metadata.create_all(bind=self.engine, checkfirst=True)
+
+    def df2table(self, df: DataFrame, table: str) -> None:
+        df.to_sql(
+            name=table,
+            con=self.engine,
+            if_exists="append",
+            index=True,
+            index_label="id",
+        )
