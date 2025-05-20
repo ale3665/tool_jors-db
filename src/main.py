@@ -1,294 +1,94 @@
-from concurrent.futures import ThreadPoolExecutor
 from json import dumps
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import Any, List
 
 import click
-from bs4 import BeautifulSoup, ResultSet, Tag
-from pandas import DataFrame, Series
+from bs4 import BeautifulSoup
+from pandas import DataFrame
 from progress.bar import Bar
-from requests import Response, get
+from requests import get
 
 from src.db import DB
 
+BASE_URL = "https://openresearchsoftware.metajnl.com"
+ARTICLES_URL = f"{BASE_URL}/articles?items=100"
 
-def getPage(url: str) -> Response:
+
+def fetch_jors_article_urls_from_html() -> List[str]:
     """
-    Fetches a webpage content using the Requests library.
-
-    This function sends a GET request to the specified URL with a timeout of 60 seconds
-    and includes a header to indicate the preferred content type. It also implements
-    retry logic to handle potential network errors.
-
-    Args:
-        url: The URL of the webpage to fetch.
+    Fetches the listing page and parses article links from the static HTML.
 
     Returns:
-        A Response object containing the webpage content.
-        Returns None if all retries fail to fetch the page.
-    """  # noqa: E501
-    return get(
-        url=url,
-        timeout=60,
-        headers={
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0",
-        },
-    )
-
-
-def getTotalNumberOfDocumentsAndPages(url: str) -> dict[str, int]:
+        List of article URLs.
     """
-    Retrieves the total number of documents and pages from a paginated webpage.
+    print("Fetching article listing HTML...")
+    resp = get(ARTICLES_URL, timeout=60)
+    soup = BeautifulSoup(resp.content, features="lxml")
 
-    This function fetches the content of a webpage using the `getPage` function
-    and parses the HTML to extract the total number of documents and the total
-    number of pages. It handles potential network errors during the request.
+    # Extract article links if present in static content
+    article_links = soup.select("a.c-listing__link")
+    urls = [link["href"] for link in article_links if link.get("href")]
 
-    Args:
-        url: The URL of the webpage to fetch.
+    # Convert relative paths to full URLs
+    full_urls = [url if url.startswith("http") else f"{BASE_URL}{url}" for url in urls]
 
-    Returns:
-        A dictionary containing the total number of documents and the total number of pages.
-        The dictionary has the following keys:
-            "docs": The total number of documents.
-            "pages": The total number of pages.
-        Returns an empty dictionary if an error occurs during the request or parsing.
-    """  # noqa: E501
-    resp: Response = getPage(url=url)
-    soup: BeautifulSoup = BeautifulSoup(markup=resp.content, features="lxml")
-
-    paginationInformation: Tag = soup.find(
-        name="span",
-        attrs={"class": "pagy info"},
-    )
-    totalDocsTag: Tag = paginationInformation.find_all(name="b")[1]
-    totalDocs: int = int(totalDocsTag.text)
-    totalPages: int = (
-        (totalDocs // 20) + 1 if totalDocs % 20 != 0 else totalDocs // 20
-    )  # noqa: E501
-
-    return {"docs": totalDocs, "pages": totalPages}
+    print(f"✅ Found {len(full_urls)} article URLs from static HTML")
+    return full_urls
 
 
-def getJOSSHTMLFrontMatter(pages: int) -> DataFrame:
-    """
-    Fetches the HTML front matter of JOSS papers for a specified number of pages.
-
-    This function uses concurrent execution to download the HTML content of JOSS papers
-    for a given range of pages. It collects the URL, page number, status code, and
-    HTML content for each paper.  The results are then organized into a Pandas DataFrame
-    and sorted by page number.
-
-    Args:
-        pages: The number of pages to fetch JOSS papers from.
-
-    Returns:
-        A Pandas DataFrame containing the HTML front matter of the JOSS papers,
-        sorted by page number.  Returns an empty DataFrame if an error occurs.
-    """  # noqa: E501
+def getJORSHTMLFrontMatter() -> DataFrame:
     data: dict[str, List[Any]] = {
         "url": [],
-        "page": [],
         "status_code": [],
         "html": [],
     }
 
-    resps: List[Response] = []
+    urls = fetch_jors_article_urls_from_html()
 
-    with Bar(
-        "Downloading HTML front matter of JOSS...", max=pages
-    ) as bar:  # noqa: E501
-        with ThreadPoolExecutor() as executor:
-
-            def _run(page: int) -> None:
-                resp: Response = getPage(
-                    url=f"https://joss.theoj.org/papers?page={page}",
-                )
-                resps.append(resp)
-                bar.next()
-
-            executor.map(
-                _run,
-                range(1, pages + 1),
-            )
-
-    with Bar("Extracting response metadata...", max=len(resps)) as bar:
-        resp: Response
-        for resp in resps:
-            data["url"].append(resp.url)
-            data["page"].append(int(resp.url.split("=")[1]))
-            data["status_code"].append(resp.status_code)
-            data["html"].append(resp.content)
+    with Bar("Downloading article HTML pages...", max=len(urls)) as bar:
+        for url in urls:
+            try:
+                resp = get(url, timeout=60)
+                if resp.status_code == 200:
+                    data["url"].append(resp.url)
+                    data["status_code"].append(resp.status_code)
+                    data["html"].append(resp.content)
+            except Exception as e:
+                print(f"[ERROR] {url}: {e}")
             bar.next()
 
-    return DataFrame(data=data).sort_values(by="page", ignore_index=True)
+    return DataFrame(data=data).sort_values(by="url", ignore_index=True)
 
 
 def extractPaperMetadataFromFrontMatter(df: DataFrame) -> DataFrame:
-    """
-    Extracts metadata from the HTML front matter of JOSS papers.
-
-    This function iterates through each row of the input DataFrame, parses the HTML
-    content, and extracts relevant metadata such as status, time, title, badges,
-    submitter information, and DOI.  The extracted metadata is then organized
-    into a new DataFrame.
-
-    Args:
-        df: A Pandas DataFrame containing the HTML front matter of JOSS papers.
-             Each row should have a column named "html" containing the HTML content.
-
-    Returns:
-        A Pandas DataFrame containing the extracted metadata.
-    """  # noqa: E501
     data: List[dict[str, Any]] = []
 
-    with Bar(
-        "Extracting paper metadata from HTML front matter...", max=df.shape[0]
-    ) as bar:
-        idx: int
-        row: Series
+    with Bar("Extracting paper metadata from HTML...", max=df.shape[0]) as bar:
         for idx, row in df.iterrows():
-            soup: BeautifulSoup = BeautifulSoup(
-                markup=row["html"],
-                features="lxml",
-            )
-            cards: ResultSet = soup.find_all(
-                name="div",
-                attrs={"class": "paper-card"},
-            )
+            soup = BeautifulSoup(row["html"], features="lxml")
 
-            card: Tag
-            for card in cards:
-                badgesDatum: List[dict[str, str] | None] = []
-                submitterDatum: dict[str, str] = {
-                    "submitter": "",
-                    "github": "",
-                }
+            title_tag = soup.find("h1", class_="c-article-title")
+            doi_tag = soup.find("a", class_="c-bibliographic-information__doi-link")
+            abstract_tag = soup.find("div", class_="c-article-section__content")
+            authors = [a.text.strip() for a in soup.select("a.c-article-author-list__author")]
+            keywords = [k.text.strip() for k in soup.select("span.article-keywords__term")]
+            software_section = soup.find("div", id="software-availability")
+            software_availability = software_section.text.strip() if software_section else None
 
-                status: str = card.find(
-                    name="span", attrs={"class": "badge"}
-                ).text.strip()
-                time: str = card.find(
-                    name="span", attrs={"class": "time"}
-                ).text.strip()  # noqa: E501
-                title: str = card.find(
-                    name="h2", attrs={"class": "paper-title"}
-                ).text.strip()
-
-                badges: ResultSet = card.find_all(
-                    name="span",
-                    attrs={"class": "badge-lang"},
-                )
-                badge: Tag
-                for badge in badges:
-                    language: str = badge.text.strip()
-                    uri: str = badge.find(name="a").get(key="href").strip()
-                    badgesDatum.append(
-                        {
-                            "language": language,
-                            "uri": uri,
-                        }
-                    )
-
-                submitterTag: Tag = card.find(
-                    name="div",
-                    attrs={"class": "submitted_by"},
-                )
-                submitterDatum["submitter"] = submitterTag.text.strip()
-                submitterDatum["github"] = (
-                    submitterTag.find(name="a").get(key="href").strip()
-                )
-
-                doiTag: Tag = card.find(name="div", attrs={"class": "doi"})
-                doi: str = doiTag.find(name="a").get("href").strip()
-
-                if doi.__contains__("https://joss.theoj.org"):
-                    pass
-                else:
-                    doi = "https://joss.theoj.org" + doi
-
-                data.append(
-                    {
-                        "front_matter_id": idx,
-                        "status": status,
-                        "time": time,
-                        "title": title,
-                        "badges": dumps(obj=badgesDatum),
-                        "submitter": dumps(obj=submitterDatum),
-                        "doi": doi,
-                    }
-                )
+            data.append({
+                "url": row["url"],
+                "title": title_tag.text.strip() if title_tag else "",
+                "doi": doi_tag.text.strip() if doi_tag else "",
+                "abstract": abstract_tag.text.strip() if abstract_tag else "",
+                "authors": dumps(authors),
+                "keywords": dumps(keywords),
+                "software_availability": software_availability,
+                "raw_html": row["html"],
+            })
 
             bar.next()
 
-    return DataFrame(data=data).sort_values(
-        by="front_matter_id",
-        ignore_index=True,
-    )
-
-
-def extractRepositoryFromPaperMetadata(df: DataFrame) -> DataFrame:
-    """
-    Extracts the repository URL from the HTML content of JOSS papers.
-
-    This function iterates through each row of the input DataFrame, fetches the
-    HTML content of the corresponding paper webpage, extracts the repository URL
-    from the HTML, and creates a new DataFrame containing the extracted
-    metadata.  It uses a thread pool to fetch the webpages concurrently.
-
-    Args:
-        df: A Pandas DataFrame containing the HTML front matter of JOSS papers.
-            Each row should have a column named "html" containing the HTML content.
-
-    Returns:
-        A Pandas DataFrame containing the extracted repository URLs and other metadata.
-    """  # noqa: E501
-    resps: List[Tuple[int, Response]] = []
-    data: List[dict[str, Any]] = []
-
-    dois: List[Tuple[int, str]] = list(df["doi"].to_dict().items())
-
-    with Bar("Downloading paper webpage...", max=len(dois)) as bar:
-        with ThreadPoolExecutor() as executor:
-
-            def _run(pairing: Tuple[int, str]) -> None:
-                resp: Response = getPage(url=pairing[1])
-                datum: Tuple[Response] = (pairing[0], resp)
-                resps.append(datum)
-                bar.next()
-
-            executor.map(_run, dois)
-
-    with Bar(
-        "Extracting repository from paper webpages...", max=len(resps)
-    ) as bar:  # noqa: E501
-        metadataID: int
-        resp: Response
-        for metadataID, resp in resps:
-            statusCode: int = resp.status_code
-            html: str = resp.content
-
-            soup: BeautifulSoup = BeautifulSoup(markup=html, features="lxml")
-            buttonsDiv: Tag = soup.find(
-                name="div",
-                attrs={"class": "btn-group-vertical"},
-            )
-            repositoryURL: str = buttonsDiv.find(name="a").get(key="href")
-
-            data.append(
-                {
-                    "metadata_id": metadataID,
-                    "status_code": statusCode,
-                    "repository_url": repositoryURL,
-                    "html": html,
-                }
-            )
-            bar.next()
-
-    return DataFrame(data=data).sort_values(
-        by="metadata_id",
-        ignore_index=True,
-    )
+    return DataFrame(data=data)
 
 
 @click.command()
@@ -305,28 +105,22 @@ def extractRepositoryFromPaperMetadata(df: DataFrame) -> DataFrame:
         resolve_path=True,
         path_type=Path,
     ),
-    default=Path("./joss.db"),
+    default=Path("./jors.db"),
 )
 def main(outputFP: Path) -> None:
     db: DB = DB(fp=outputFP)
-    db.createTables()
+    db.create_tables()
 
-    totalNumberOfPagesAndPapers: dict[str, int] = (
-        getTotalNumberOfDocumentsAndPages(  # noqa: E501
-            url="https://joss.theoj.org/papers",
-        )
-    )
-
-    hfmDF: DataFrame = getJOSSHTMLFrontMatter(
-        pages=totalNumberOfPagesAndPapers["pages"]
-    )
+    hfmDF: DataFrame = getJORSHTMLFrontMatter()
     pmDF: DataFrame = extractPaperMetadataFromFrontMatter(df=hfmDF)
-    rDF: DataFrame = extractRepositoryFromPaperMetadata(df=pmDF)
 
-    db.df2table(df=hfmDF, table="front_matter")
-    db.df2table(df=pmDF, table="metadata")
-    db.df2table(df=rDF, table="software")
+    print("Extracted metadata for", len(pmDF), "articles")
+    if not pmDF.empty:
+        print(pmDF[["title", "doi"]].head())
+
+    db.df2table(df=pmDF, table="articles")
 
 
 if __name__ == "__main__":
     main()
+
