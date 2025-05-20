@@ -1,101 +1,140 @@
-from json import dumps
+import requests
+from bs4 import BeautifulSoup
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import click
-from bs4 import BeautifulSoup
 from pandas import DataFrame
 from progress.bar import Bar
-from requests import get
 
 from src.db import DB
 
-BASE_URL = "https://openresearchsoftware.metajnl.com"
-ARTICLES_URL = f"{BASE_URL}/articles?items=100"
+ARTICLES_URL_TEMPLATE = "https://openresearchsoftware.metajnl.com/articles?items=100&page={}"
 
 
-def fetch_jors_article_urls_from_html() -> List[str]:
+def get_all_article_urls() -> List[Tuple[str, int]]:
+    print("🔎 Scraping article URLs from JORS...")
+    all_urls: List[Tuple[str, int]] = []
+
+    for page in range(1, 5):  # 4 pages total
+        url = ARTICLES_URL_TEMPLATE.format(page)
+        print(f"Fetching {url}...")
+        response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=60)
+        if response.status_code != 200:
+            print(f"[WARN] Failed to load page {page}")
+            continue
+
+        soup = BeautifulSoup(response.content, "lxml")
+        links = soup.find_all("a", href=True)
+
+        article_links = {
+            "https://openresearchsoftware.metajnl.com" + a["href"]
+            for a in links
+            if a["href"].startswith("/articles/10.") and not a["href"].endswith(".pdf")
+        }
+
+        all_urls.extend((url, page) for url in article_links)
+        print(f"✅ Found {len(article_links)} unique articles on page {page}")
+
+    unique_urls = list(set(all_urls))
+    print(f"✅ Total unique articles found: {len(unique_urls)}")
+    return unique_urls
+
+
+def download_html_pages(urls_with_pages: List[Tuple[str, int]]) -> DataFrame:
+    data = {"url": [], "html": [], "page": []}
+    print("⚡ Downloading HTML front matter of JORS articles...")
+
+    def fetch(index: int, url: str, page: int) -> Tuple[str, bytes | None, int]:
+        try:
+            print(f"📄 Fetching {index + 1}/{len(urls_with_pages)}: {url}")
+            response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+            if response.status_code == 200:
+                return url, response.content, page
+            else:
+                return url, None, page
+        except Exception as e:
+            print(f"[ERROR] Failed to fetch {url}: {e}")
+            return url, None, page
+
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        futures = [executor.submit(fetch, i, url, page) for i, (url, page) in enumerate(urls_with_pages)]
+        for future in as_completed(futures):
+            url, content, page = future.result()
+            if content:
+                data["url"].append(url)
+                data["html"].append(content)
+                data["page"].append(page)
+
+    print(f"✅ Downloaded {len(data['url'])} articles successfully.")
+    return DataFrame(data)
+
+
+def extract_metadata(df: DataFrame) -> DataFrame:
     """
-    Fetches the listing page and parses article links from the static HTML.
-
-    Returns:
-        List of article URLs.
+    Extracts article metadata: title, DOI, abstract, publication date, and authors.
     """
-    print("Fetching article listing HTML...")
-    resp = get(ARTICLES_URL, timeout=60)
-    soup = BeautifulSoup(resp.content, features="lxml")
-
-    # Extract article links if present in static content
-    article_links = soup.select("a.c-listing__link")
-    urls = [link["href"] for link in article_links if link.get("href")]
-
-    # Convert relative paths to full URLs
-    full_urls = [url if url.startswith("http") else f"{BASE_URL}{url}" for url in urls]
-
-    print(f"✅ Found {len(full_urls)} article URLs from static HTML")
-    return full_urls
-
-
-def getJORSHTMLFrontMatter() -> DataFrame:
-    data: dict[str, List[Any]] = {
-        "url": [],
-        "status_code": [],
-        "html": [],
-    }
-
-    urls = fetch_jors_article_urls_from_html()
-
-    with Bar("Downloading article HTML pages...", max=len(urls)) as bar:
-        for url in urls:
-            try:
-                resp = get(url, timeout=60)
-                if resp.status_code == 200:
-                    data["url"].append(resp.url)
-                    data["status_code"].append(resp.status_code)
-                    data["html"].append(resp.content)
-            except Exception as e:
-                print(f"[ERROR] {url}: {e}")
-            bar.next()
-
-    return DataFrame(data=data).sort_values(by="url", ignore_index=True)
-
-
-def extractPaperMetadataFromFrontMatter(df: DataFrame) -> DataFrame:
     data: List[dict[str, Any]] = []
 
     with Bar("Extracting paper metadata from HTML...", max=df.shape[0]) as bar:
         for idx, row in df.iterrows():
-            soup = BeautifulSoup(row["html"], features="lxml")
+            soup = BeautifulSoup(row["html"], "lxml")
 
-            title_tag = soup.find("h1", class_="c-article-title")
-            doi_tag = soup.find("a", class_="c-bibliographic-information__doi-link")
-            abstract_tag = soup.find("div", class_="c-article-section__content")
-            authors = [a.text.strip() for a in soup.select("a.c-article-author-list__author")]
-            keywords = [k.text.strip() for k in soup.select("span.article-keywords__term")]
-            software_section = soup.find("div", id="software-availability")
-            software_availability = software_section.text.strip() if software_section else None
+            try:
+                # Title
+                full_title = soup.title.string.strip() if soup.title else ""
+                title = full_title.split(" - Journal of Open Research Software")[0]
 
-            data.append({
-                "url": row["url"],
-                "title": title_tag.text.strip() if title_tag else "",
-                "doi": doi_tag.text.strip() if doi_tag else "",
-                "abstract": abstract_tag.text.strip() if abstract_tag else "",
-                "authors": dumps(authors),
-                "keywords": dumps(keywords),
-                "software_availability": software_availability,
-                "raw_html": row["html"],
-            })
+                # URL
+                url = row["url"]
+
+                # Authors
+                author_tags = soup.find_all("meta", attrs={"name": "dc.creator"})
+                if not author_tags:
+                    author_tags = soup.find_all("meta", attrs={"name": "citation_author"})
+                authors = "; ".join(tag["content"].strip() for tag in author_tags if tag.get("content"))
+
+                # Publication date (from visible label)
+                # Publication date: search for visible text containing "Published on"
+                pub_date = ""
+                for tag in soup.find_all(string=True):
+                    text = tag.strip()
+                    if text.lower().startswith("published on"):
+                        pub_date = text.replace("Published on", "").strip()
+                        break
+
+
+                # Abstract: find a heading with "Abstract", then get the next sibling
+                abstract = ""
+                abstract_header = soup.find(lambda tag: tag.name in ["h2", "strong", "b"] and "abstract" in tag.text.lower())
+                if abstract_header:
+                    next_elem = abstract_header.find_next()
+                    while next_elem and next_elem.name not in ["p", "div"]:
+                        next_elem = next_elem.find_next()
+                    if next_elem:
+                        abstract = next_elem.text.strip()
+
+                data.append({
+                    "url": url,
+                    "title": title,
+                    "abstract": abstract,
+                    "publication_date": pub_date,
+                    "authors": authors,
+                })
+
+            except Exception as e:
+                print(f"[ERROR] Failed to parse {row['url']}: {e}")
 
             bar.next()
 
-    return DataFrame(data=data)
+    print(f"✅ Extracted metadata for {len(data)} articles")
+    return DataFrame(data)
 
 
 @click.command()
 @click.option(
-    "-o",
-    "--output",
-    "outputFP",
+    "-o", "--output", "outputFP",
     help="Path to output SQLite3 database",
     required=False,
     type=click.Path(
@@ -111,14 +150,12 @@ def main(outputFP: Path) -> None:
     db: DB = DB(fp=outputFP)
     db.create_tables()
 
-    hfmDF: DataFrame = getJORSHTMLFrontMatter()
-    pmDF: DataFrame = extractPaperMetadataFromFrontMatter(df=hfmDF)
+    article_urls = get_all_article_urls()
+    htmldf = download_html_pages(article_urls)
+    metadf = extract_metadata(htmldf)
 
-    print("Extracted metadata for", len(pmDF), "articles")
-    if not pmDF.empty:
-        print(pmDF[["title", "doi"]].head())
-
-    db.df2table(df=pmDF, table="articles")
+    db.df2table(df=htmldf, table="front_matter")
+    db.df2table(df=metadf, table="metadata")
 
 
 if __name__ == "__main__":
