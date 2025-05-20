@@ -13,6 +13,29 @@ from src.db import DB
 ARTICLES_URL_TEMPLATE = "https://openresearchsoftware.metajnl.com/articles?items=100&page={}"
 
 
+def download_listing_pages(total_pages: int = 4) -> DataFrame:
+    """
+    Downloads the HTML content for each of the listing pages.
+    """
+    data = {"url": [], "html": [], "page": []}
+    print("⚡ Downloading listing pages from JORS...")
+
+    for page in range(1, total_pages + 1):
+        url = ARTICLES_URL_TEMPLATE.format(page)
+        print(f"📄 Fetching listing page {page}: {url}")
+        try:
+            response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+            if response.status_code == 200:
+                data["url"].append(url)
+                data["html"].append(response.text)
+                data["page"].append(page)
+        except Exception as e:
+            print(f"[ERROR] Failed to fetch page {page}: {e}")
+
+    print(f"✅ Downloaded {len(data['url'])} listing pages successfully.")
+    return DataFrame(data)
+
+
 def get_all_article_urls() -> List[Tuple[str, int]]:
     print("🔎 Scraping article URLs from JORS...")
     all_urls: List[Tuple[str, int]] = []
@@ -42,7 +65,7 @@ def get_all_article_urls() -> List[Tuple[str, int]]:
     return unique_urls
 
 
-def download_html_pages(urls_with_pages: List[Tuple[str, int]]) -> DataFrame:
+def download_article_pages(urls_with_pages: List[Tuple[str, int]]) -> DataFrame:
     data = {"url": [], "html": [], "page": []}
     print("⚡ Downloading HTML front matter of JORS articles...")
 
@@ -72,9 +95,6 @@ def download_html_pages(urls_with_pages: List[Tuple[str, int]]) -> DataFrame:
 
 
 def extract_metadata(df: DataFrame) -> DataFrame:
-    """
-    Extracts article metadata: title, DOI, abstract, publication date, and authors.
-    """
     data: List[dict[str, Any]] = []
 
     with Bar("Extracting paper metadata from HTML...", max=df.shape[0]) as bar:
@@ -82,21 +102,16 @@ def extract_metadata(df: DataFrame) -> DataFrame:
             soup = BeautifulSoup(row["html"], "lxml")
 
             try:
-                # Title
                 full_title = soup.title.string.strip() if soup.title else ""
                 title = full_title.split(" - Journal of Open Research Software")[0]
 
-                # URL
                 url = row["url"]
 
-                # Authors
                 author_tags = soup.find_all("meta", attrs={"name": "dc.creator"})
                 if not author_tags:
                     author_tags = soup.find_all("meta", attrs={"name": "citation_author"})
                 authors = "; ".join(tag["content"].strip() for tag in author_tags if tag.get("content"))
 
-                # Publication date (from visible label)
-                # Publication date: search for visible text containing "Published on"
                 pub_date = ""
                 for tag in soup.find_all(string=True):
                     text = tag.strip()
@@ -104,8 +119,6 @@ def extract_metadata(df: DataFrame) -> DataFrame:
                         pub_date = text.replace("Published on", "").strip()
                         break
 
-
-                # Abstract: find a heading with "Abstract", then get the next sibling
                 abstract = ""
                 abstract_header = soup.find(lambda tag: tag.name in ["h2", "strong", "b"] and "abstract" in tag.text.lower())
                 if abstract_header:
@@ -150,11 +163,14 @@ def main(outputFP: Path) -> None:
     db: DB = DB(fp=outputFP)
     db.create_tables()
 
-    article_urls = get_all_article_urls()
-    htmldf = download_html_pages(article_urls)
-    metadf = extract_metadata(htmldf)
+    # Store only listing pages in front_matter
+    listing_pages_df = download_listing_pages()
+    db.df2table(df=listing_pages_df, table="front_matter")
 
-    db.df2table(df=htmldf, table="front_matter")
+    # Scrape metadata from individual articles
+    article_urls = get_all_article_urls()
+    article_pages_df = download_article_pages(article_urls)
+    metadf = extract_metadata(article_pages_df)
     db.df2table(df=metadf, table="metadata")
 
 
